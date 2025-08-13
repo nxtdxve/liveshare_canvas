@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>LiveShare Canvas</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Professional collaborative drawing platform">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <%= stylesheet_link_tag "application", "data-turbo-track": "reload" %>
+  <%= stylesheet_link_tag "drawing", "data-turbo-track": "reload" %>
+</head>
+
+<body>
+  <div class="dynamic-cursor" id="dynamicCursor"></div>
+  
+  <div class="color-palette" id="colorPalette">
+    <div class="color-grid" id="colorGrid"></div>
+    <div class="custom-color-section">
+      <div class="custom-color-label">Custom Color</div>
+      <input type="color" id="colorPickerInput" class="color-picker-input" value="#000000">
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="header">
+      <h1>LiveShare Canvas</h1>
+      <p class="subtitle">Professional collaborative drawing platform</p>
+      
+      <div id="roomSetup" class="room-section">
+        <div class="room-options">
+          <div class="room-option selected" data-mode="create">
+            <h3>Create Room</h3>
+            <p>Start a new drawing session</p>
+          </div>
+          <div class="room-option" data-mode="join">
+            <h3>Join Room</h3>
+            <p>Enter an existing session</p>
+          </div>
+        </div>
+        
+        <div class="form-group">
+          <div class="form-row">
+            <div class="form-field">
+              <label class="form-label">Your Name</label>
+              <input type="text" id="usernameInput" class="form-input" placeholder="Enter your name" maxlength="20">
+            </div>
+            <div class="form-field" id="roomCodeField" style="display: none;">
+              <label class="form-label">Room Code</label>
+              <input type="text" id="roomCodeInput" class="form-input room-code-input" placeholder="XXXX" maxlength="4">
+            </div>
+          </div>
+        </div>
+        
+        <button id="joinButton" class="btn btn-primary btn-full">Create Room</button>
+      </div>
+      
+      <div id="roomInfo" class="room-info">
+        <div class="room-info-content">
+          <div class="room-details">
+            <div class="room-code-display" id="currentRoomCode"></div>
+            <p class="room-subtitle">Share this code with others to collaborate</p>
+          </div>
+          <button id="leaveRoomButton" class="btn btn-secondary">Leave Room</button>
+        </div>
+      </div>
+    </div>
+    
+    <div id="workspace" class="workspace" style="display: none;">
+      <div class="canvas-container">
+        <canvas id="drawingCanvas" width="1200" height="800"></canvas>
+        
+        <div class="floating-toolbar top-left">
+          <div class="tool-panel">
+            <div class="color-picker-container">
+              <div class="color-display" id="colorDisplay" style="background-color: #000000;" title="Color"></div>
+            </div>
+          </div>
+          
+          <div class="tool-panel">
+            <div class="brush-tools">
+              <button class="brush-btn active" data-brush="pencil" title="Pencil">✏️</button>
+              <button class="brush-btn" data-brush="marker" title="Marker">🖊️</button>
+              <button class="brush-btn" data-brush="eraser" title="Eraser">🧽</button>
+            </div>
+          </div>
+          
+          <div class="tool-panel size-panel">
+            <div class="size-display" id="sizeDisplay">5</div>
+            <input type="range" id="brushSize" class="size-slider" min="1" max="50" value="5">
+          </div>
+        </div>
+        
+        <div class="floating-toolbar top-right">
+          <div class="tool-panel actions-panel">
+            <button id="undoButton" class="action-btn" title="Undo">↶</button>
+            <button id="redoButton" class="action-btn" title="Redo">↷</button>
+            <button id="saveButton" class="action-btn" title="Save">💾</button>
+            <button id="clearCanvas" class="action-btn danger" title="Clear All">🗑️</button>
+          </div>
+        </div>
+        
+        <div class="floating-toolbar bottom-right">
+          <div class="tool-panel users-panel">
+            <div class="users-header">👥 <span id="userCount">1</span></div>
+            <div id="usersList" class="users-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const App = {
+      state: {
+        canvas: null,
+        ctx: null,
+        isDrawing: false,
+        currentUser: null,
+        currentColor: '#000000',
+        currentSize: 5,
+        currentBrush: 'pencil',
+        users: new Set(),
+        userColors: new Map(),
+        remoteCursors: new Map(),
+        ws: null,
+        undoStack: [],
+        redoStack: [],
+        lastPath: [],
+        dynamicCursor: null,
+        currentRoom: null,
+        roomMode: 'create',
+        canvasState: null,
+        lastCursorBroadcast: 0
+      },
+
+      init() {
+        this.state.canvas = document.getElementById('drawingCanvas');
+        this.state.ctx = this.state.canvas.getContext('2d');
+        this.state.dynamicCursor = document.getElementById('dynamicCursor');
+        
+        this.setupEventListeners();
+        this.initializeColorPicker();
+        this.updateDynamicCursor();
+        
+        document.getElementById('usernameInput').focus();
+      },
+
+      setupEventListeners() {
+        const { canvas } = this.state;
+        
+        canvas.addEventListener('mousedown', this.startDrawing.bind(this));
+        canvas.addEventListener('mousemove', this.draw.bind(this));
+        canvas.addEventListener('mouseup', this.stopDrawing.bind(this));
+        canvas.addEventListener('mouseout', this.stopDrawing.bind(this));
+        canvas.addEventListener('mousemove', this.updateCursor.bind(this));
+        canvas.addEventListener('mousemove', this.broadcastCursor.bind(this));
+        canvas.addEventListener('mouseenter', this.showCursor.bind(this));
+        canvas.addEventListener('mouseleave', this.hideCursor.bind(this));
+        
+        canvas.addEventListener('touchstart', this.handleTouch.bind(this));
+        canvas.addEventListener('touchmove', this.handleTouch.bind(this));
+        canvas.addEventListener('touchend', this.stopDrawing.bind(this));
+        
+        document.querySelectorAll('.room-option').forEach(option => {
+          option.addEventListener('click', this.handleRoomSelection.bind(this));
+        });
+        
+        document.getElementById('joinButton').addEventListener('click', this.handleRoomAction.bind(this));
+        document.getElementById('usernameInput').addEventListener('keypress', this.handleEnterKey.bind(this));
+        document.getElementById('roomCodeInput').addEventListener('keypress', this.handleEnterKey.bind(this));
+        document.getElementById('roomCodeInput').addEventListener('input', this.limitRoomCode.bind(this));
+        
+        document.getElementById('brushSize').addEventListener('input', this.handleBrushSizeChange.bind(this));
+        
+        document.querySelectorAll('.brush-btn').forEach(btn => {
+          btn.addEventListener('click', this.handleBrushSelection.bind(this));
+        });
+        
+        const actions = {
+          clearCanvas: this.clearCanvas.bind(this),
+          undoButton: this.undo.bind(this),
+          redoButton: this.redo.bind(this),
+          saveButton: this.saveCanvas.bind(this),
+          leaveRoomButton: this.leaveRoom.bind(this)
+        };
+        
+        Object.keys(actions).forEach(id => {
+          document.getElementById(id).addEventListener('click', actions[id]);
+        });
+        
+        document.addEventListener('keydown', this.handleKeyboardShortcuts.bind(this));
+      },
+
+      handleRoomSelection(e) {
+        document.querySelector('.room-option.selected').classList.remove('selected');
+        e.target.closest('.room-option').classList.add('selected');
+        this.state.roomMode = e.target.closest('.room-option').dataset.mode;
+        
+        const roomCodeField = document.getElementById('roomCodeField');
+        const joinButton = document.getElementById('joinButton');
+        
+        if (this.state.roomMode === 'join') {
+          roomCodeField.style.display = 'block';
+          joinButton.textContent = 'Join Room';
+        } else {
+          roomCodeField.style.display = 'none';
+          joinButton.textContent = 'Create Room';
+        }
+      },
+
+      handleRoomAction() {
+        const username = document.getElementById('usernameInput').value.trim();
+        if (!username) return alert('Please enter your name');
+        
+        const roomCode = this.state.roomMode === 'create' 
+          ? Math.floor(1000 + Math.random() * 9000).toString()
+          : document.getElementById('roomCodeInput').value.trim();
+          
+        if (this.state.roomMode === 'join' && (!roomCode || roomCode.length !== 4)) {
+          return alert('Please enter a valid 4-digit room code');
+        }
+        
+        this.state.currentUser = username;
+        this.state.currentRoom = roomCode;
+        
+        this.showWorkspace(roomCode);
+        this.initializeWebSocket();
+      },
+
+      showWorkspace(roomCode) {
+        document.getElementById('roomSetup').style.display = 'none';
+        document.getElementById('roomInfo').classList.add('active');
+        document.getElementById('currentRoomCode').textContent = roomCode;
+        document.getElementById('workspace').style.display = 'flex';
+        
+        requestAnimationFrame(() => this.initializeCanvasForRoom());
+      },
+
+      handleEnterKey(e) {
+        if (e.key === 'Enter') this.handleRoomAction();
+      },
+
+      limitRoomCode(e) {
+        e.target.value = e.target.value.replace(/[^0-9]/g, '').substring(0, 4);
+      },
+
+      handleBrushSizeChange(e) {
+        this.state.currentSize = e.target.value;
+        document.getElementById('sizeDisplay').textContent = this.state.currentSize;
+        this.updateDynamicCursor();
+      },
+
+      handleBrushSelection(e) {
+        document.querySelector('.brush-btn.active').classList.remove('active');
+        e.target.classList.add('active');
+        this.state.currentBrush = e.target.dataset.brush;
+        this.updateDynamicCursor();
+        this.updateCanvasCursor();
+      },
+
+      handleKeyboardShortcuts(e) {
+        if (!(e.ctrlKey || e.metaKey)) return;
+        
+        e.preventDefault();
+        if (e.key === 'z') e.shiftKey ? this.redo() : this.undo();
+        if (e.key === 's') this.saveCanvas();
+      },
+
+      getMousePos(e) {
+        const rect = this.state.canvas.getBoundingClientRect();
+        return {
+          x: (e.clientX - rect.left) * (this.state.canvas.width / rect.width),
+          y: (e.clientY - rect.top) * (this.state.canvas.height / rect.height)
+        };
+      },
+
+      getTouchPos(e) {
+        const rect = this.state.canvas.getBoundingClientRect();
+        const touch = e.touches[0];
+        return {
+          x: (touch.clientX - rect.left) * (this.state.canvas.width / rect.width),
+          y: (touch.clientY - rect.top) * (this.state.canvas.height / rect.height)
+        };
+      },
+
+      startDrawing(e) {
+        if (!this.state.currentUser) return;
+        
+        this.state.isDrawing = true;
+        const pos = this.getMousePos(e);
+        this.state.lastPath = [pos];
+        
+        this.state.ctx.beginPath();
+        this.state.ctx.moveTo(pos.x, pos.y);
+        
+        this.configureBrush();
+        this.broadcastDrawing({ ...pos, type: 'draw', startNewPath: true });
+      },
+
+      draw(e) {
+        if (!this.state.currentUser || !this.state.isDrawing) return;
+        
+        const pos = this.getMousePos(e);
+        this.state.lastPath.push(pos);
+        
+        if (this.state.lastPath.length > 2) {
+          const current = this.state.lastPath[this.state.lastPath.length - 2];
+          const next = pos;
+          const mid = {
+            x: (current.x + next.x) / 2,
+            y: (current.y + next.y) / 2
+          };
+          
+          this.state.ctx.quadraticCurveTo(current.x, current.y, mid.x, mid.y);
+          this.state.ctx.stroke();
+        } else {
+          this.state.ctx.lineTo(pos.x, pos.y);
+          this.state.ctx.stroke();
+        }
+        
+        this.broadcastDrawing({ ...pos, type: 'draw', startNewPath: false });
+      },
+
+      stopDrawing() {
+        if (this.state.isDrawing) {
+          this.state.isDrawing = false;
+          this.state.ctx.globalCompositeOperation = 'source-over';
+          this.state.ctx.globalAlpha = 1.0;
+          this.state.canvasState = this.state.ctx.getImageData(0, 0, this.state.canvas.width, this.state.canvas.height);
+          this.saveState();
+          this.state.lastPath = [];
+        }
+      },
+
+      configureBrush() {
+        const { ctx, currentBrush, currentSize, currentColor } = this.state;
+        
+        const brushConfig = {
+          pencil: { width: currentSize, alpha: 1.0, operation: 'source-over' },
+          marker: { width: currentSize * 2, alpha: 0.7, operation: 'multiply' },
+          eraser: { width: currentSize * 3, alpha: 1.0, operation: 'destination-out' }
+        };
+        
+        const config = brushConfig[currentBrush];
+        ctx.lineWidth = config.width;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = currentColor;
+        ctx.globalCompositeOperation = config.operation;
+        ctx.globalAlpha = config.alpha;
+      },
+
+      handleTouch(e) {
+        e.preventDefault();
+        const touch = e.touches[0];
+        const mouseEvent = new MouseEvent(e.type.replace('touch', 'mouse'), {
+          clientX: touch.clientX,
+          clientY: touch.clientY,
+          bubbles: true
+        });
+        this.state.canvas.dispatchEvent(mouseEvent);
+      },
+
+      updateCursor(e) {
+        if (!this.state.currentUser || !this.state.dynamicCursor) return;
+        
+        this.state.canvas.style.cursor = 'none';
+        this.state.dynamicCursor.style.display = 'block';
+        
+        if (e) {
+          this.state.dynamicCursor.style.left = e.clientX + 'px';
+          this.state.dynamicCursor.style.top = e.clientY + 'px';
+        }
+      },
+
+      updateCanvasCursor() {
+        this.state.canvas.style.cursor = 'crosshair';
+      },
+
+      showCursor() {
+        if (this.state.currentUser && this.state.dynamicCursor) {
+          this.state.dynamicCursor.style.display = 'block';
+          this.state.canvas.style.cursor = 'none';
+        }
+      },
+
+      hideCursor() {
+        if (this.state.dynamicCursor) {
+          this.state.dynamicCursor.style.display = 'none';
+          this.state.canvas.style.cursor = 'default';
+        }
+      },
+
+      updateDynamicCursor() {
+        if (!this.state.dynamicCursor) return;
+        
+        const sizeMultiplier = { pencil: 1, marker: 2, eraser: 3 };
+        const size = this.state.currentSize * sizeMultiplier[this.state.currentBrush];
+        
+        this.state.dynamicCursor.style.width = size + 'px';
+        this.state.dynamicCursor.style.height = size + 'px';
+        
+        const colors = {
+          eraser: 'rgba(255, 107, 107, 0.5)',
+          marker: this.state.currentColor + '80',
+          pencil: this.state.currentColor + '40'
+        };
+        
+        this.state.dynamicCursor.style.backgroundColor = colors[this.state.currentBrush];
+      },
+
+      initializeColorPicker() {
+        const colorDisplay = document.getElementById('colorDisplay');
+        const colorPalette = document.getElementById('colorPalette');
+        const colorGrid = document.getElementById('colorGrid');
+        const colorPickerInput = document.getElementById('colorPickerInput');
+        
+        const colors = [
+          '#000000', '#ffffff', '#ff0000', '#00ff00', '#0000ff', '#ffff00', '#ff00ff', '#00ffff',
+          '#800000', '#808080', '#800080', '#008000', '#000080', '#808000', '#ff8000', '#8000ff',
+          '#ff4444', '#44ff44', '#4444ff', '#ffff44', '#ff44ff', '#44ffff', '#884400', '#448800',
+          '#ff6b6b', '#4ecdc4', '#45b7d1', '#f9ca24', '#f0932b', '#eb4d4b', '#6c5ce7', '#fd79a8',
+          '#2d3436', '#636e72', '#b2bec3', '#ddd', '#74b9ff', '#0984e3', '#00b894', '#00cec9'
+        ];
+        
+        colors.forEach(color => {
+          const swatch = document.createElement('div');
+          swatch.className = 'color-swatch';
+          swatch.style.backgroundColor = color;
+          swatch.addEventListener('click', () => this.selectColor(color));
+          colorGrid.appendChild(swatch);
+        });
+        
+        colorDisplay.addEventListener('click', (e) => {
+          e.stopPropagation();
+          colorPalette.classList.toggle('active');
+        });
+        
+        colorPickerInput.addEventListener('change', (e) => {
+          this.selectColor(e.target.value);
+        });
+        
+        document.addEventListener('click', (e) => {
+          if (!colorPalette.contains(e.target) && !colorDisplay.contains(e.target)) {
+            colorPalette.classList.remove('active');
+          }
+        });
+      },
+
+      selectColor(color) {
+        this.state.currentColor = color;
+        document.getElementById('colorDisplay').style.backgroundColor = color;
+        document.getElementById('colorPickerInput').value = color;
+        this.updateDynamicCursor();
+        
+        document.querySelectorAll('.color-swatch').forEach(swatch => {
+          swatch.classList.toggle('selected', 
+            swatch.style.backgroundColor === color || 
+            this.rgbToHex(swatch.style.backgroundColor) === color);
+        });
+        
+        document.getElementById('colorPalette').classList.remove('active');
+      },
+
+      rgbToHex(rgb) {
+        if (!rgb || rgb === 'transparent') return '#ffffff';
+        const result = rgb.match(/\\d+/g);
+        if (!result) return rgb;
+        return "#" + ((1 << 24) + (parseInt(result[0]) << 16) + (parseInt(result[1]) << 8) + parseInt(result[2])).toString(16).slice(1);
+      },
+
+      generateUserColor(username) {
+        const colors = [
+          '#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F', 
+          '#BB8FCE', '#85C1E9', '#F8C471', '#82E0AA', '#F1948A', '#AED6F1',
+          '#F39C12', '#E74C3C', '#9B59B6', '#3498DB', '#1ABC9C', '#2ECC71',
+          '#F1C40F', '#E67E22', '#E91E63', '#9C27B0', '#673AB7', '#3F51B5'
+        ];
+        let hash = 0;
+        for (let i = 0; i < username.length; i++) {
+          hash = username.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        return colors[Math.abs(hash) % colors.length];
+      },
+
+      broadcastCursor(e) {
+        if (!this.state.currentUser || !this.state.ws || this.state.ws.readyState !== WebSocket.OPEN) return;
+        
+        const now = Date.now();
+        if (now - this.state.lastCursorBroadcast < 50) return; // Throttle to 20fps
+        this.state.lastCursorBroadcast = now;
+
+        const pos = this.getMousePos(e);
+        this.broadcastDrawing({
+          type: 'cursor',
+          x: pos.x,
+          y: pos.y,
+          user: this.state.currentUser
+        });
+      },
+
+      createRemoteCursor(username, color) {
+        const cursor = document.createElement('div');
+        cursor.className = 'remote-cursor';
+        cursor.style.cssText = `
+          position: absolute;
+          width: 12px;
+          height: 12px;
+          background: ${color};
+          border: 2px solid white;
+          border-radius: 50%;
+          pointer-events: none;
+          z-index: 1001;
+          transform: translate(-50%, -50%);
+          box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+          display: none;
+        `;
+        
+        const label = document.createElement('div');
+        label.className = 'remote-cursor-label';
+        label.textContent = username;
+        label.style.cssText = `
+          position: absolute;
+          top: 20px;
+          left: 50%;
+          transform: translateX(-50%);
+          background: ${color};
+          color: white;
+          padding: 2px 6px;
+          border-radius: 10px;
+          font-size: 10px;
+          font-weight: 500;
+          white-space: nowrap;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        `;
+        
+        cursor.appendChild(label);
+        this.state.canvas.parentElement.appendChild(cursor);
+        
+        return cursor;
+      },
+
+      updateRemoteCursor(username, x, y) {
+        if (!this.state.remoteCursors.has(username)) {
+          const color = this.state.userColors.get(username) || this.generateUserColor(username);
+          this.state.userColors.set(username, color);
+          const cursor = this.createRemoteCursor(username, color);
+          this.state.remoteCursors.set(username, cursor);
+        }
+
+        const cursor = this.state.remoteCursors.get(username);
+        const rect = this.state.canvas.getBoundingClientRect();
+        
+        // Convert canvas coordinates to screen coordinates
+        const screenX = rect.left + (x * rect.width / this.state.canvas.width);
+        const screenY = rect.top + (y * rect.height / this.state.canvas.height);
+        
+        cursor.style.left = screenX + 'px';
+        cursor.style.top = screenY + 'px';
+        cursor.style.display = 'block';
+        
+        // Hide cursor after 3 seconds of inactivity
+        clearTimeout(cursor.hideTimeout);
+        cursor.hideTimeout = setTimeout(() => {
+          cursor.style.display = 'none';
+        }, 3000);
+      },
+
+      removeRemoteCursor(username) {
+        if (this.state.remoteCursors.has(username)) {
+          const cursor = this.state.remoteCursors.get(username);
+          cursor.remove();
+          this.state.remoteCursors.delete(username);
+        }
+      },
+
+      initializeCanvasForRoom() {
+        const container = this.state.canvas.parentElement;
+        if (!container) return;
+        
+        const rect = container.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) {
+          setTimeout(() => this.initializeCanvasForRoom(), 100);
+          return;
+        }
+        
+        const width = Math.floor(rect.width - 2);
+        const height = Math.floor(rect.height - 2);
+        
+        this.state.canvas.width = width;
+        this.state.canvas.height = height;
+        this.state.canvas.style.width = width + 'px';
+        this.state.canvas.style.height = height + 'px';
+        
+        this.state.ctx.fillStyle = 'white';
+        this.state.ctx.fillRect(0, 0, this.state.canvas.width, this.state.canvas.height);
+        
+        this.state.canvasState = this.state.ctx.getImageData(0, 0, this.state.canvas.width, this.state.canvas.height);
+        this.state.undoStack = [this.state.canvas.toDataURL()];
+        this.state.redoStack = [];
+      },
+
+      updateUsersList() {
+        const usersList = document.getElementById('usersList');
+        const userCount = document.getElementById('userCount');
+        
+        usersList.innerHTML = '';
+        userCount.textContent = this.state.users.size;
+        
+        this.state.users.forEach(user => {
+          const color = this.state.userColors.get(user) || this.generateUserColor(user);
+          this.state.userColors.set(user, color);
+          
+          const userTag = document.createElement('span');
+          userTag.className = 'user-tag';
+          userTag.textContent = user;
+          userTag.style.backgroundColor = color;
+          userTag.style.borderColor = color;
+          usersList.appendChild(userTag);
+        });
+      },
+
+      saveState() {
+        try {
+          this.state.undoStack.push(this.state.canvas.toDataURL());
+          if (this.state.undoStack.length > 20) this.state.undoStack.shift();
+          this.state.redoStack = [];
+        } catch (e) {
+          console.warn('Could not save canvas state:', e);
+        }
+      },
+
+      undo() {
+        if (this.state.undoStack.length > 1) {
+          this.state.redoStack.push(this.state.undoStack.pop());
+          const previousState = this.state.undoStack[this.state.undoStack.length - 1];
+          this.restoreCanvas(previousState);
+          this.broadcastDrawing({ type: 'undo', canvasState: previousState });
+        }
+      },
+
+      redo() {
+        if (this.state.redoStack.length > 0) {
+          const nextState = this.state.redoStack.pop();
+          this.state.undoStack.push(nextState);
+          this.restoreCanvas(nextState);
+          this.broadcastDrawing({ type: 'redo', canvasState: nextState });
+        }
+      },
+
+      restoreCanvas(dataUrl) {
+        const img = new Image();
+        img.onload = () => {
+          this.state.ctx.clearRect(0, 0, this.state.canvas.width, this.state.canvas.height);
+          this.state.ctx.drawImage(img, 0, 0);
+          this.state.canvasState = this.state.ctx.getImageData(0, 0, this.state.canvas.width, this.state.canvas.height);
+        };
+        img.src = dataUrl;
+      },
+
+      saveCanvas() {
+        const link = document.createElement('a');
+        link.download = `liveshare-canvas-${Date.now()}.png`;
+        link.href = this.state.canvas.toDataURL();
+        link.click();
+      },
+
+      clearCanvas() {
+        if (!this.state.currentUser) return;
+        
+        this.state.ctx.fillStyle = 'white';
+        this.state.ctx.fillRect(0, 0, this.state.canvas.width, this.state.canvas.height);
+        this.state.canvasState = this.state.ctx.getImageData(0, 0, this.state.canvas.width, this.state.canvas.height);
+        this.saveState();
+        this.broadcastDrawing({ type: 'clear' });
+      },
+
+      initializeWebSocket() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/cable`;
+        this.state.ws = new WebSocket(wsUrl);
+        
+        this.state.ws.onopen = () => {
+          this.state.ws.send(JSON.stringify({
+            command: 'subscribe',
+            identifier: JSON.stringify({ channel: 'DrawingChannel' })
+          }));
+          
+          setTimeout(() => {
+            this.state.ws.send(JSON.stringify({
+              command: 'message',
+              identifier: JSON.stringify({ channel: 'DrawingChannel' }),
+              data: JSON.stringify({
+                action: 'join_canvas',
+                username: this.state.currentUser,
+                room_code: this.state.currentRoom,
+                mode: this.state.roomMode
+              })
+            }));
+          }, 100);
+        };
+        
+        this.state.ws.onmessage = (event) => {
+          const message = JSON.parse(event.data);
+          if (message.message) this.handleReceivedData(message.message);
+        };
+        
+        this.state.ws.onclose = () => {
+          setTimeout(() => this.initializeWebSocket(), 3000);
+        };
+      },
+
+      handleReceivedData(data) {
+        if (data.user === this.state.currentUser) return;
+        
+        const handlers = {
+          error: () => {
+            alert(data.message);
+            this.resetToSetup();
+          },
+          room_joined: () => {
+            this.state.users = new Set(data.users);
+            this.updateUsersList();
+          },
+          room_left: () => this.resetToSetup(),
+          draw: () => this.drawFromNetwork(data),
+          cursor: () => {
+            if (data.user && data.user !== this.state.currentUser) {
+              this.updateRemoteCursor(data.user, data.x, data.y);
+            }
+          },
+          clear: () => {
+            this.state.ctx.fillStyle = 'white';
+            this.state.ctx.fillRect(0, 0, this.state.canvas.width, this.state.canvas.height);
+            this.state.canvasState = this.state.ctx.getImageData(0, 0, this.state.canvas.width, this.state.canvas.height);
+            this.saveState();
+          },
+          undo: () => this.restoreCanvas(data.canvasState),
+          redo: () => this.restoreCanvas(data.canvasState),
+          users_update: () => {
+            this.state.users = new Set(data.users);
+            this.updateUsersList();
+          },
+          user_joined: () => {
+            this.state.users.add(data.user);
+            this.updateUsersList();
+          },
+          user_left: () => {
+            this.state.users.delete(data.user);
+            this.removeRemoteCursor(data.user);
+            this.updateUsersList();
+          }
+        };
+        
+        if (handlers[data.type]) handlers[data.type]();
+      },
+
+      drawFromNetwork(data) {
+        const savedState = {
+          color: this.state.ctx.strokeStyle,
+          width: this.state.ctx.lineWidth,
+          lineCap: this.state.ctx.lineCap,
+          operation: this.state.ctx.globalCompositeOperation,
+          alpha: this.state.ctx.globalAlpha
+        };
+        
+        const brushConfig = {
+          pencil: { width: data.size, alpha: 1.0, operation: 'source-over' },
+          marker: { width: data.size * 2, alpha: 0.7, operation: 'multiply' },
+          eraser: { width: data.size * 3, alpha: 1.0, operation: 'destination-out' }
+        };
+        
+        const config = brushConfig[data.brush || 'pencil'];
+        this.state.ctx.lineWidth = config.width;
+        this.state.ctx.strokeStyle = data.color;
+        this.state.ctx.globalCompositeOperation = config.operation;
+        this.state.ctx.globalAlpha = config.alpha;
+        this.state.ctx.lineCap = 'round';
+        this.state.ctx.lineJoin = 'round';
+        
+        if (data.startNewPath) {
+          this.state.ctx.beginPath();
+          this.state.ctx.moveTo(data.x, data.y);
+        } else {
+          this.state.ctx.lineTo(data.x, data.y);
+          this.state.ctx.stroke();
+        }
+        
+        Object.assign(this.state.ctx, savedState);
+      },
+
+      resetToSetup() {
+        document.getElementById('roomSetup').style.display = 'block';
+        document.getElementById('roomInfo').classList.remove('active');
+        document.getElementById('workspace').style.display = 'none';
+        this.state.currentRoom = null;
+        this.state.currentUser = null;
+        this.state.users.clear();
+        this.state.userColors.clear();
+        
+        // Clean up all remote cursors
+        this.state.remoteCursors.forEach(cursor => cursor.remove());
+        this.state.remoteCursors.clear();
+      },
+
+      leaveRoom() {
+        if (this.state.ws && this.state.ws.readyState === WebSocket.OPEN && this.state.currentRoom) {
+          this.state.ws.send(JSON.stringify({
+            command: 'message',
+            identifier: JSON.stringify({ channel: 'DrawingChannel' }),
+            data: JSON.stringify({ action: 'leave_room' })
+          }));
+        }
+      },
+
+      broadcastDrawing(data) {
+        if (this.state.ws && this.state.ws.readyState === WebSocket.OPEN) {
+          this.state.ws.send(JSON.stringify({
+            command: 'message',
+            identifier: JSON.stringify({ channel: 'DrawingChannel' }),
+            data: JSON.stringify({
+              ...data,
+              color: this.state.currentColor,
+              size: this.state.currentSize,
+              brush: this.state.currentBrush,
+              user: this.state.currentUser
+            })
+          }));
+        }
+      }
+    };
+
+    document.addEventListener('DOMContentLoaded', () => App.init());
+  </script>
+</body>
+</html>
